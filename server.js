@@ -3,19 +3,17 @@ const axios = require('axios');
 const path = require('path');
 const app = express();
 
-// Render asigna el puerto automáticamente
 const PORT = process.env.PORT || 3000;
 
-// Servir el mapa desde la carpeta 'public'
+// Servimos los archivos de la carpeta public (el mapa)
 app.use(express.static('public'));
 
-// Endpoint de ruteo
+// Endpoint que procesa el ruteo
 app.get('/get-route', async (req, res) => {
     const { coords } = req.query;
     if (!coords) return res.status(400).json({ error: "Faltan coordenadas" });
 
     try {
-        // Llamada al motor OSRM
         const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
         const response = await axios.get(url);
         
@@ -25,7 +23,7 @@ app.get('/get-route', async (req, res) => {
 
         const route = response.data.routes[0];
 
-        // Transformación a Formato Esri (JSON)
+        // Respuesta en formato Esri JSON para que el mapa la entienda
         const esriResponse = {
             geometryType: "esriGeometryPolyline",
             spatialReference: { wkid: 4326 },
@@ -44,10 +42,10 @@ app.get('/get-route', async (req, res) => {
 
         res.json(esriResponse);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: "Error en el servidor de ruteo" });
     }
 });
 
 app.listen(PORT, () => {
-    console.log(`Servidor activo en puerto ${PORT}`);
+    console.log(`Servidor activo en el puerto ${PORT}`);
 });
