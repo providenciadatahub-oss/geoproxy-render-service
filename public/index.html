@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Ruteo Providencia - Render</title>
+  <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/light/main.css">
+  <script src="https://js.arcgis.com/4.28/"></script>
+  <style>
+    html, body, #viewDiv { height: 100%; width: 100%; margin: 0; padding: 0; }
+    #panel { 
+      position: absolute; top: 15px; left: 15px; background: white; padding: 15px; 
+      border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 10; font-family: sans-serif; 
+    }
+  </style>
+</head>
+<body>
+  <div id="panel">
+    <b>OSRM Routing - Render</b><br>
+    <small>Haz clic en dos puntos para calcular ruta.</small>
+  </div>
+  <div id="viewDiv"></div>
+
+  <script>
+    require([
+      "esri/Map", "esri/views/MapView", "esri/Graphic", "esri/geometry/Polyline"
+    ], function(Map, MapView, Graphic, Polyline) {
+      
+      const map = new Map({ basemap: "streets-navigation-vector" });
+      const view = new MapView({ 
+        container: "viewDiv", 
+        map: map, 
+        center: [-70.614, -33.423], 
+        zoom: 14 
+      });
+
+      let points = [];
+
+      view.on("click", async (event) => {
+        if (points.length >= 2) {
+            points = [];
+            view.graphics.removeAll();
+        }
+
+        points.push({ lon: event.mapPoint.longitude, lat: event.mapPoint.latitude });
+
+        view.graphics.add(new Graphic({
+          geometry: event.mapPoint,
+          symbol: { type: "simple-marker", color: "#FF5722", outline: { color: "white", width: 2 } }
+        }));
+
+        if (points.length === 2) {
+          const p1 = `${points[0].lon.toFixed(6)},${points[0].lat.toFixed(6)}`;
+          const p2 = `${points[1].lon.toFixed(6)},${points[1].lat.toFixed(6)}`;
+          const coordsString = `${p1};${p2}`;
+          
+          try {
+            // Llamada al servidor Node.js
+            const res = await fetch(`/get-route?coords=${coordsString}`);
+            const data = await res.json();
+
+            if (data.features) {
+              const routeGraphic = new Graphic({
+                geometry: new Polyline(data.features[0].geometry),
+                symbol: { type: "simple-line", color: "#007AFF", width: 4 },
+                attributes: data.features[0].attributes,
+                popupTemplate: { 
+                  title: "Ruta Calculada", 
+                  content: "Distancia: {Distancia_km} km<br>Tiempo: {Tiempo_min} min" 
+                }
+              });
+              view.graphics.add(routeGraphic);
+              view.popup.open({ features: [routeGraphic], location: event.mapPoint });
+            }
+          } catch (err) {
+            console.error("Error:", err);
+          }
+        }
+      });
+    });
+  </script>
+</body>
+</html>
