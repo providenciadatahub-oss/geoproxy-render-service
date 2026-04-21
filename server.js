@@ -1,51 +1,87 @@
 const express = require('express');
 const axios = require('axios');
-const path = require('path');
+const cors = require('cors');
 const app = express();
 
-const PORT = process.env.PORT || 3000;
+app.use(cors({ origin: '*' }));
+app.use(express.json({ limit: '50mb' }));
 
-// Servimos los archivos de la carpeta public (el mapa)
-app.use(express.static('public'));
+// --- TRADUCTOR DE COORDENADAS (Web Mercator a WGS84) ---
+// Vital para que los clics del mapa de la Muni se conviertan a Lat/Lon
+function toLatLon(x, y) {
+    if (Math.abs(x) <= 180) return { lon: x, lat: y };
+    const lon = (x / 20037508.34) * 180;
+    let lat = (y / 20037508.34) * 180;
+    lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
+    return { lon, lat };
+}
 
-// Endpoint que procesa el ruteo
-app.get('/get-route', async (req, res) => {
-    const { coords } = req.query;
-    if (!coords) return res.status(400).json({ error: "Faltan coordenadas" });
+const nasMetadata = {
+    "currentVersion": 10.81,
+    "layerType": "esriNAServerRouteLayer",
+    "capabilities": "Route,NetworkAnalysis",
+    "supportedTravelModes": [{"id": "1", "name": "Ruta OSRM Providencia"}],
+    "defaultTravelMode": "1",
+    "spatialReference": { "wkid": 4326 },
+    "directionsSupported": true,
+    "supportedParameters": "f,stops,travelMode,returnDirections,returnRoutes,outSR"
+};
+
+// --- RUTAS DE COMPATIBILIDAD ARCGIS ---
+
+// 1. Info del servidor
+app.get('/arcgis/rest/info', (req, res) => res.json({ currentVersion: 10.81, authInfo: { isTokenBasedSecurity: false } }));
+
+// 2. Metadatos del servicio (Lo que el widget lee para decir "Compatible")
+app.get(['/arcgis/rest/services/World/Route/NAServer', '/arcgis/rest/services/World/Route/NAServer/Route_World'], (req, res) => {
+    res.json(nasMetadata);
+});
+
+// 3. Motor de rutas /solve
+// Soporta el wildcard '*' para capturar cualquier ruta que termine en /solve
+app.all('*/solve', async (req, res) => {
+    const stopsParam = req.query.stops || req.body.stops;
+    if (!stopsParam) return res.json({ routes: { features: [] } });
 
     try {
-        const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
-        const response = await axios.get(url);
+        let stopsJson = typeof stopsParam === 'string' ? JSON.parse(stopsParam) : stopsParam;
         
-        if (!response.data.routes || response.data.routes.length === 0) {
-            return res.status(404).json({ error: "No se encontró ruta" });
-        }
+        // Convertimos cada punto del mapa de Provi a Lat/Lon para OSRM
+        let coords = stopsJson.features.map(f => {
+            const p = toLatLon(f.geometry.x, f.geometry.y);
+            return `${p.lon.toFixed(6)},${p.lat.toFixed(6)}`;
+        }).join(';');
 
-        const route = response.data.routes[0];
+        const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=true`;
+        const resp = await axios.get(url);
+        const route = resp.data.routes[0];
 
-        // Respuesta en formato Esri JSON para que el mapa la entienda
-        const esriResponse = {
-            geometryType: "esriGeometryPolyline",
-            spatialReference: { wkid: 4326 },
-            features: [{
-                attributes: { 
-                    OBJECTID: 1,
-                    Distancia_km: (route.distance / 1000).toFixed(2), 
-                    Tiempo_min: (route.duration / 60).toFixed(1) 
-                },
-                geometry: { 
-                    paths: [route.geometry.coordinates], 
-                    spatialReference: { wkid: 4326 } 
-                }
+        // Enviamos la respuesta de vuelta a ArcGIS
+        res.json({
+            messages: [],
+            routes: {
+                geometryType: "esriGeometryPolyline",
+                spatialReference: { wkid: 4326 },
+                features: [{
+                    attributes: { 
+                        ObjectID: 1, 
+                        Total_TravelTime: route.duration / 60, 
+                        Total_Kilometers: route.distance / 1000 
+                    },
+                    geometry: { paths: [route.geometry.coordinates] }
+                }]
+            },
+            directions: [{
+                features: route.legs[0].steps.map(s => ({ 
+                    attributes: { text: s.maneuver.instruction, length: s.distance / 1000 } 
+                }))
             }]
-        };
-
-        res.json(esriResponse);
-    } catch (error) {
-        res.status(500).json({ error: "Error en el servidor de ruteo" });
+        });
+    } catch (e) { 
+        console.error("Error en ruteo:", e.message);
+        res.status(500).json({ error: e.message }); 
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Servidor activo en el puerto ${PORT}`);
-});
+const port = process.env.PORT || 10000;
+app.listen(port, () => console.log(`Proxy OSRM Profesional activo en puerto ${port}`));
