@@ -3,11 +3,17 @@ const axios = require('axios');
 const cors = require('cors');
 const app = express();
 
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '50mb' }));
+// Configuración de CORS ultra-stricta
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
 
-// --- TRADUCTOR DE COORDENADAS (Web Mercator a WGS84) ---
-// Vital para que los clics del mapa de la Muni se conviertan a Lat/Lon
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// --- TRADUCTOR DE COORDENADAS ---
 function toLatLon(x, y) {
     if (Math.abs(x) <= 180) return { lon: x, lat: y };
     const lon = (x / 20037508.34) * 180;
@@ -18,35 +24,40 @@ function toLatLon(x, y) {
 
 const nasMetadata = {
     "currentVersion": 10.81,
+    "serviceDescription": "OSRM Proxy Providencia",
     "layerType": "esriNAServerRouteLayer",
     "capabilities": "Route,NetworkAnalysis",
-    "supportedTravelModes": [{"id": "1", "name": "Ruta OSRM Providencia"}],
+    "supportedTravelModes": [{"id": "1", "name": "Ruta OSRM"}],
     "defaultTravelMode": "1",
-    "spatialReference": { "wkid": 4326 },
+    "spatialReference": { "wkid": 102100, "latestWkid": 3857 },
     "directionsSupported": true,
-    "supportedParameters": "f,stops,travelMode,returnDirections,returnRoutes,outSR"
+    "supportedParameters": "f,stops,travelMode,returnDirections,returnRoutes,outSR",
+    "layers": [{ "id": 0, "name": "Route", "type": "Network Layer" }]
 };
 
-// --- RUTAS DE COMPATIBILIDAD ARCGIS ---
+// --- ENDPOINTS DE VALIDACIÓN ---
+const routePaths = [
+    '/arcgis/rest/services/World/Route/NAServer',
+    '/arcgis/rest/services/World/Route/NAServer/Route_World',
+    '/arcgis/rest/services/World/Route/NAServer/Route_World/0'
+];
 
-// 1. Info del servidor
-app.get('/arcgis/rest/info', (req, res) => res.json({ currentVersion: 10.81, authInfo: { isTokenBasedSecurity: false } }));
-
-// 2. Metadatos del servicio (Lo que el widget lee para decir "Compatible")
-app.get(['/arcgis/rest/services/World/Route/NAServer', '/arcgis/rest/services/World/Route/NAServer/Route_World'], (req, res) => {
+app.get(routePaths, (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
     res.json(nasMetadata);
 });
 
-// 3. Motor de rutas /solve
-// Soporta el wildcard '*' para capturar cualquier ruta que termine en /solve
+app.get('/arcgis/rest/info', (req, res) => {
+    res.json({ currentVersion: 10.81, authInfo: { isTokenBasedSecurity: false } });
+});
+
+// --- EL MOTOR DE RUTAS ---
 app.all('*/solve', async (req, res) => {
     const stopsParam = req.query.stops || req.body.stops;
     if (!stopsParam) return res.json({ routes: { features: [] } });
 
     try {
         let stopsJson = typeof stopsParam === 'string' ? JSON.parse(stopsParam) : stopsParam;
-        
-        // Convertimos cada punto del mapa de Provi a Lat/Lon para OSRM
         let coords = stopsJson.features.map(f => {
             const p = toLatLon(f.geometry.x, f.geometry.y);
             return `${p.lon.toFixed(6)},${p.lat.toFixed(6)}`;
@@ -56,30 +67,70 @@ app.all('*/solve', async (req, res) => {
         const resp = await axios.get(url);
         const route = resp.data.routes[0];
 
-        // Enviamos la respuesta de vuelta a ArcGIS
+        // Cálculo de envolvente (envelope) para el mapa
+        const lons = route.geometry.coordinates.map(c => c[0]);
+        const lats = route.geometry.coordinates.map(c => c[1]);
+
+        res.setHeader('Content-Type', 'application/json');
         res.json({
             messages: [],
             routes: {
+                displayFieldName: "",
+                fieldAliases: {
+                    ObjectID: "ObjectID",
+                    Name: "Name",
+                    Total_Minutes: "Total_Minutes",
+                    Total_Kilometers: "Total_Kilometers"
+                },
                 geometryType: "esriGeometryPolyline",
-                spatialReference: { wkid: 4326 },
+                spatialReference: { wkid: 102100, latestWkid: 3857 },
+                fields: [
+                    { name: "ObjectID", type: "esriFieldTypeOID", alias: "ObjectID" },
+                    { name: "Name", type: "esriFieldTypeString", alias: "Name", length: 1024 },
+                    { name: "Total_Minutes", type: "esriFieldTypeDouble", alias: "Total_Minutes" },
+                    { name: "Total_Kilometers", type: "esriFieldTypeDouble", alias: "Total_Kilometers" }
+                ],
                 features: [{
                     attributes: { 
                         ObjectID: 1, 
-                        Total_TravelTime: route.duration / 60, 
+                        Name: "Ruta OSRM Providencia",
+                        Total_Minutes: route.duration / 60, 
                         Total_Kilometers: route.distance / 1000 
                     },
-                    geometry: { paths: [route.geometry.coordinates] }
+                    geometry: { 
+                        paths: [route.geometry.coordinates],
+                        spatialReference: { wkid: 102100 }
+                    }
                 }]
             },
             directions: [{
-                features: route.legs[0].steps.map(s => ({ 
-                    attributes: { text: s.maneuver.instruction, length: s.distance / 1000 } 
+                routeName: "Ruta 1",
+                summary: {
+                    totalLength: route.distance / 1000,
+                    totalTime: route.duration / 60,
+                    totalDriveTime: route.duration / 60,
+                    envelope: {
+                        xmin: Math.min(...lons),
+                        ymin: Math.min(...lats),
+                        xmax: Math.max(...lons),
+                        ymax: Math.max(...lats),
+                        spatialReference: { wkid: 102100 }
+                    }
+                },
+                features: route.legs[0].steps.map((s, idx) => ({ 
+                    attributes: { 
+                        text: s.maneuver.instruction, 
+                        length: s.distance / 1000,
+                        time: s.duration / 60,
+                        ETA: 0,
+                        maneuverType: "esriDMTUnknown"
+                    } 
                 }))
             }]
         });
-    } catch (e) { 
-        console.error("Error en ruteo:", e.message);
-        res.status(500).json({ error: e.message }); 
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: e.message });
     }
 });
 
