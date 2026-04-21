@@ -1,60 +1,41 @@
-const express = require('express');
-const axios = require('axios');
-const cors = require('cors'); // MODIFICACIÓN: Importar CORS
-const path = require('path');
-const app = express();
-
-const PORT = process.env.PORT || 3000;
-
-// MODIFICACIÓN: Habilitar CORS para que Experience Builder Online pueda leer tu API
-app.use(cors());
-
-// Servimos los archivos de la carpeta public (el mapa base)
-app.use(express.static('public'));
-
-// Endpoint que procesa el ruteo
-app.get('/get-route', async (req, res) => {
-    const { coords } = req.query;
+// Este endpoint hace que Render hable "Dialept Esri"
+app.get('/solve', async (req, res) => {
+    const { stops, f } = req.query; // ArcGIS envía los puntos en 'stops' y pide formato en 'f'
     
-    // Log para ver qué llega desde ArcGIS Online
-    console.log(`Solicitud de ruta recibida: ${coords}`);
-
-    if (!coords) return res.status(400).json({ error: "Faltan coordenadas" });
+    if (!stops) return res.status(400).json({ error: "Faltan stops" });
 
     try {
-        const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
-        const response = await axios.get(url);
-        
-        if (!response.data.routes || response.data.routes.length === 0) {
-            return res.status(404).json({ error: "No se encontró ruta" });
-        }
+        // 1. Convertir los stops de ArcGIS a formato OSRM
+        // ArcGIS envía stops como JSON: {"features": [{"geometry": {"x": lon, "y": lat}}, ...]}
+        const stopsData = JSON.parse(stops);
+        const p1 = stopsData.features[0].geometry;
+        const p2 = stopsData.features[1].geometry;
+        const coordsString = `${p1.x},${p1.y};${p2.x},${p2.y}`;
 
+        // 2. Llamar a OSRM (lo que ya hacíamos)
+        const url = `https://router.project-osrm.org/route/v1/driving/${coordsString}?overview=full&geometries=geojson`;
+        const response = await axios.get(url);
         const route = response.data.routes[0];
 
-        // Respuesta en formato Esri JSON (compatible con Experience Builder)
-        const esriResponse = {
-            geometryType: "esriGeometryPolyline",
-            spatialReference: { wkid: 4326 },
-            features: [{
-                attributes: { 
-                    OBJECTID: 1,
-                    Distancia_km: (route.distance / 1000).toFixed(2), 
-                    Tiempo_min: (route.duration / 60).toFixed(1) 
-                },
-                geometry: { 
-                    paths: [route.geometry.coordinates], 
-                    spatialReference: { wkid: 4326 } 
-                }
-            }]
+        // 3. Responder con el formato EXACTO que espera el motor de ArcGIS
+        const esriStandardResponse = {
+            routes: {
+                features: [{
+                    attributes: { 
+                        Name: "Ruta Providencia",
+                        Total_Kilometers: route.distance / 1000,
+                        Total_Minutes: route.duration / 60
+                    },
+                    geometry: { 
+                        paths: [route.geometry.coordinates],
+                        spatialReference: { wkid: 4326 }
+                    }
+                }]
+            }
         };
 
-        res.json(esriResponse);
+        res.json(esriStandardResponse);
     } catch (error) {
-        console.error("Error en OSRM:", error.message);
-        res.status(500).json({ error: "Error en el servidor de ruteo" });
+        res.status(500).json({ error: "Error en el puente Esri-OSRM" });
     }
-});
-
-app.listen(PORT, () => {
-    console.log(`Servidor activo en el puerto ${PORT}`);
 });
